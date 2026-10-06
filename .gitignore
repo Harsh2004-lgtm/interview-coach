@@ -1,2 +1,6 @@
 node_modules/
-.envgit commit -m "Initial project setup"
+.env
+.env.local
+dist/
+build/
+.DS_Store
