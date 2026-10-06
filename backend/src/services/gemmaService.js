@@ -1,19 +1,17 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 /**
- * Service to interface with Google Gemma for Interview Coach
- * Primary: Google AI Studio (gemma-2-9b-it or gemma-2-27b-it)
- * Fallback: Groq (gemma2-9b-it), Ollama local, or Smart Mock mode
+ * Service to interface with Google Gemma / Google AI for Interview Coach
+ * Powered directly by Google AI Studio API Key
  */
 
 // Helper to safely extract JSON from LLM responses
 function extractJson(text) {
   if (!text) throw new Error('Empty response from model');
   
-  // Try clean JSON first
   let cleaned = text.trim();
   
-  // Strip markdown code fences if present: ```json ... ``` or ``` ... ```
+  // Strip markdown code fences: ```json ... ``` or ``` ... ```
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```(json)?\n?/, '').replace(/\n?```$/, '').trim();
   } else {
@@ -28,13 +26,13 @@ function extractJson(text) {
   try {
     return JSON.parse(cleaned);
   } catch (err) {
-    console.error('Failed to parse JSON directly. Raw output:', text);
-    // Secondary attempt: fix trailing commas or common JSON formatting flaws
+    // Secondary attempt: fix trailing commas or whitespace anomalies
     try {
       const sanitized = cleaned.replace(/,\s*([\]}])/g, '$1');
       return JSON.parse(sanitized);
     } catch (e) {
-      throw new Error(`Invalid JSON returned by Gemma: ${err.message}. Raw: ${text.slice(0, 200)}...`);
+      console.error('Failed to parse JSON. Raw output:', text);
+      throw new Error(`Invalid JSON format: ${err.message}`);
     }
   }
 }
@@ -42,93 +40,63 @@ function extractJson(text) {
 class GemmaService {
   constructor() {
     this.geminiApiKey = process.env.GEMINI_API_KEY || '';
-    this.modelName = process.env.GEMMA_MODEL || 'gemma-2-9b-it';
-    this.groqApiKey = process.env.GROQ_API_KEY || '';
-    this.ollamaUrl = process.env.OLLAMA_BASE_URL || '';
+    // Priority order of Google AI models to ensure high availability and speed
+    this.preferredModel = process.env.GEMMA_MODEL || 'gemma-4-31b-it';
+    this.candidateModels = [
+      this.preferredModel,
+      'gemma-4-26b-a4b-it',
+      'gemini-3.5-flash-lite',
+      'gemini-3.1-flash-lite',
+      'gemini-3.8-flash'
+    ];
+    this.activeModel = this.preferredModel;
   }
 
   getActiveProvider() {
-    if (this.geminiApiKey) return { provider: 'Google AI Studio (Gemma)', model: this.modelName, ready: true };
-    if (this.groqApiKey) return { provider: 'Groq (Gemma 2)', model: 'gemma2-9b-it', ready: true };
-    if (this.ollamaUrl) return { provider: 'Ollama (Local Gemma)', model: 'gemma2', ready: true };
-    return { provider: 'Mock Gemma Engine (Demo Mode)', model: 'gemma-2-9b-mock', ready: false };
+    if (this.geminiApiKey) {
+      return { 
+        provider: 'Google AI (Gemma Engine)', 
+        model: this.activeModel, 
+        ready: true 
+      };
+    }
+    return { 
+      provider: 'High-Fidelity Demo Engine', 
+      model: 'gemma-2-9b-demo', 
+      ready: false 
+    };
   }
 
   async callGemma(systemPrompt, userPrompt) {
-    const combinedPrompt = `${systemPrompt}\n\nIMPORTANT: You must output ONLY a valid JSON object matching the requested schema. Do not write any conversational text or notes outside of the JSON block.\n\nUser request:\n${userPrompt}`;
+    const combinedPrompt = `${systemPrompt}\n\nIMPORTANT: You must output ONLY a valid JSON object matching the requested schema. Do not write any conversational text, explanations, or notes outside of the JSON block.\n\nUser request:\n${userPrompt}`;
 
-    // 1. Try Google AI Studio (Official Gemma)
     if (this.geminiApiKey) {
-      try {
-        const genAI = new GoogleGenerativeAI(this.geminiApiKey);
-        const model = genAI.getGenerativeModel({
-          model: this.modelName,
-          generationConfig: {
-            temperature: 0.7,
-            topP: 0.9,
-          },
-        });
-        const result = await model.generateContent(combinedPrompt);
-        const response = await result.response;
-        const text = response.text();
-        return extractJson(text);
-      } catch (err) {
-        console.warn(`[GemmaService] Google AI Studio call failed: ${err.message}. Trying fallbacks...`);
-      }
-    }
+      const genAI = new GoogleGenerativeAI(this.geminiApiKey);
 
-    // 2. Try Groq (Gemma 2 9b)
-    if (this.groqApiKey) {
-      try {
-        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.groqApiKey}`
-          },
-          body: JSON.stringify({
-            model: 'gemma2-9b-it',
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt }
-            ],
-            response_format: { type: 'json_object' },
-            temperature: 0.7
-          })
-        });
-        const data = await res.json();
-        if (data.choices && data.choices[0]?.message?.content) {
-          return extractJson(data.choices[0].message.content);
+      // Attempt models in candidate list for 100% reliable execution
+      for (const modelName of this.candidateModels) {
+        try {
+          const model = genAI.getGenerativeModel({
+            model: modelName,
+            generationConfig: {
+              temperature: 0.7,
+              topP: 0.9,
+            },
+          });
+          const result = await model.generateContent(combinedPrompt);
+          const response = await result.response;
+          const text = response.text();
+          const parsed = extractJson(text);
+          this.activeModel = modelName;
+          return parsed;
+        } catch (err) {
+          console.warn(`[GemmaService] Model '${modelName}' returned: ${err.message}. Trying next available model...`);
         }
-      } catch (err) {
-        console.warn(`[GemmaService] Groq call failed: ${err.message}`);
       }
     }
 
-    // 3. Try Ollama (Local)
-    if (this.ollamaUrl) {
-      try {
-        const res = await fetch(`${this.ollamaUrl}/api/generate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'gemma2',
-            prompt: combinedPrompt,
-            format: 'json',
-            stream: false
-          })
-        });
-        const data = await res.json();
-        if (data.response) {
-          return extractJson(data.response);
-        }
-      } catch (err) {
-        console.warn(`[GemmaService] Ollama call failed: ${err.message}`);
-      }
-    }
-
-    // Fallback: Smart Mock Generator
-    console.log('[GemmaService] Using high-fidelity fallback generator');
+    // High-Fidelity Fallback if key missing or network issues
+    console.log('[GemmaService] Using high-fidelity structured fallback response');
     return null;
   }
 
@@ -146,7 +114,7 @@ Guidelines:
 - If Technical: Ask a realistic, scenario-based technical concept or architecture question fitting the role and level. Avoid trivial trivia.
 - If HR: Ask a behavioral or situational question tailored to ${experienceLevel} level (e.g. conflict, prioritization, ownership, leadership).
 - If Mixed: Start with a strong foundational question that touches on how they apply technical judgment in team contexts.
-- Include a brief 'intent' explaining what an interviewer evaluates with this question.
+- Include a brief 'interviewerIntent' explaining what an interviewer evaluates with this question.
 
 Return JSON in this format:
 {
@@ -155,7 +123,7 @@ Return JSON in this format:
   "question": "The question text",
   "interviewerIntent": "What skills, instincts, or competencies this question evaluates",
   "expectedKeyPoints": ["Key point 1", "Key point 2", "Key point 3"],
-  "tipForCandidate": "A brief encouraging tip on how to structure their answer (e.g., using STAR method or trade-off analysis)"
+  "tipForCandidate": "A brief encouraging tip on how to structure their answer"
 }`;
 
     const userPrompt = `Generate question #1 for a ${experienceLevel} ${role} in ${mode} interview mode.`;
@@ -163,7 +131,6 @@ Return JSON in this format:
     const result = await this.callGemma(systemPrompt, userPrompt);
     if (result && result.question) return result;
 
-    // Smart Mock Fallback if no LLM key
     return this.getMockInitialQuestion(role, experienceLevel, mode);
   }
 
@@ -180,8 +147,8 @@ Question: "${question}"
 Candidate Answer: "${candidateAnswer}"
 
 Grading Criteria:
-1. Technical Knowledge (0-10): Technical correctness, conceptual depth, appropriate terminology, awareness of edge cases or trade-offs. (For HR questions, evaluate professional acumen, best practices, and work methodology).
-2. Communication (0-10): Clarity, conciseness, structured thinking (e.g. STAR method), articulation, tone, avoid rambling.
+1. Technical Knowledge (0-10): Technical correctness, conceptual depth, appropriate terminology, awareness of edge cases or trade-offs.
+2. Communication (0-10): Clarity, conciseness, structured thinking (e.g. STAR method), articulation, tone.
 3. Answer Quality (0-10): Completeness, relevance to the specific question asked, concrete examples, logical flow.
 
 Also produce:
@@ -251,8 +218,8 @@ Interview History so far:
 ${JSON.stringify((history || []).map(h => ({ q: h.question, cat: h.category, score: h.evaluation?.scores?.overall })))}
 
 Adaptation Logic:
-1. If the candidate had a shallow or incomplete answer: Follow up directly on the missing detail or edge case to give them a chance to elaborate or demonstrate depth.
-2. If the candidate gave a strong or exceptional answer: Escalate the difficulty, present a complex trade-off, or pivot smoothly to a complementary domain (e.g., from code implementation to scalability, resilience, or team collaboration).
+1. If the candidate had a shallow or incomplete answer: Follow up directly on the missing detail or edge case to give them an opportunity to elaborate.
+2. If the candidate gave a strong or exceptional answer: Escalate the difficulty, present a complex architectural trade-off, or pivot to scalability or cross-functional team leadership.
 3. If mode is Mixed: Balance between technical and behavioral questions across the session.
 4. Ensure no repetitive questions.
 
@@ -260,7 +227,7 @@ Return JSON in this format:
 {
   "questionNumber": ${questionIndex + 1},
   "category": "Technical | Behavioral | Deep Dive | System Design | Situational",
-  "adaptiveReason": "Brief explanation of why this question was chosen based on the candidate's prior answer (e.g. 'Since you mentioned microservices in the last answer, let's explore how you handle distributed transactions...')",
+  "adaptiveReason": "Brief explanation of why this question was chosen based on the candidate's prior answer (e.g. 'Since you mentioned caching in the last answer, let's explore cache invalidation strategies under distributed load...')",
   "question": "The adaptive question text",
   "interviewerIntent": "What this follow-up specifically tests",
   "expectedKeyPoints": ["Point 1", "Point 2", "Point 3"],
@@ -334,7 +301,7 @@ Return JSON in this exact structure:
     return this.getMockReport(role, experienceLevel, mode, history);
   }
 
-  // --- Mock Generators for Demo / Instant Offline Resilience ---
+  // --- Fallback Mock Generators ---
 
   getMockInitialQuestion(role, experienceLevel, mode) {
     if (mode === 'HR') {

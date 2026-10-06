@@ -58,9 +58,16 @@ export default function InterviewView({
       };
 
       recognition.onerror = (event) => {
-        console.warn('Speech recognition error:', event.error);
+        if (event.error === 'no-speech' || event.error === 'aborted') {
+          // Normal behavior when silence is detected or stopped, ignore cleanly
+          setIsListening(false);
+          return;
+        }
+        console.warn('Speech recognition event:', event.error);
         if (event.error === 'not-allowed') {
-          setSpeechError('Microphone permission denied. You can continue typing your answer.');
+          setSpeechError('Microphone access was denied. Please grant permission or continue by typing.');
+        } else {
+          setSpeechError(`Voice input: ${event.error}`);
         }
         setIsListening(false);
       };
@@ -70,9 +77,9 @@ export default function InterviewView({
       };
 
       recognitionRef.current = recognition;
-    } else {
-      setSpeechError('Speech recognition is not supported in this browser. Please type your response.');
     }
+    // Do not show an error on mount if speech recognition is unsupported;
+    // handled on click instead.
 
     return () => {
       if (recognitionRef.current) {
